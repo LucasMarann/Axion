@@ -33,6 +33,28 @@ export async function getRouteInsight(routeId: string) {
   return apiFetch<{ activeInsight: ActiveInsight }>(`/v1/routes/${routeId}/insight`);
 }
 
+export type RouteView = {
+  planned: {
+    routeId: string;
+    code: string;
+    originName: string;
+    destinationName: string;
+    plannedStartAt: string | null;
+  };
+  executed: {
+    delaySecondsApplied: number;
+    points: { capturedAt: string; lat: number; lng: number }[];
+  };
+  stops: {
+    delaySecondsApplied: number;
+    items: { startedAt: string; endedAt: string; durationSeconds: number; lat: number; lng: number }[];
+  };
+};
+
+export async function getRouteView(routeId: string) {
+  return apiFetch<RouteView>(`/v1/routes/${routeId}/view`);
+}
+
 export type AiInsight = {
   id: string;
   route_id: string;
