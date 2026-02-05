@@ -7,13 +7,14 @@ export function deliveriesRoutes() {
   const router = Router();
   const controller = new DeliveriesController();
 
-  // CLIENT/OWNER podem consultar entrega por tracking (o isolamento real vem do RLS + vínculo)
-  router.get(
-    "/:trackingCode",
-    requireAuth(),
-    requireRole(["CLIENT", "OWNER"]),
-    controller.getByTracking
-  );
+  // POST /deliveries (OWNER)
+  router.post("/", requireAuth(), requireRole(["OWNER"]), controller.create);
+
+  // GET /deliveries/:trackingCode (CLIENT/OWNER) - isolamento forte vem do RLS
+  router.get("/:trackingCode", requireAuth(), requireRole(["CLIENT", "OWNER"]), controller.getByTracking);
+
+  // PATCH /deliveries/:id/status (OWNER/DRIVER)
+  router.patch("/:id/status", requireAuth(), requireRole(["OWNER", "DRIVER"]), controller.updateStatus);
 
   return router;
 }
