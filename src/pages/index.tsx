@@ -2,8 +2,11 @@ import React from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useAuth } from "@/components/auth/auth-provider";
 
 export default function Index() {
+  const { session, profile, isLoading } = useAuth();
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto w-full max-w-5xl px-4 py-10">
@@ -20,10 +23,17 @@ export default function Index() {
               <CardTitle>Acesso</CardTitle>
               <CardDescription>Login simples (Supabase Auth)</CardDescription>
             </CardHeader>
-            <CardContent className="flex items-center justify-between gap-3">
+            <CardContent className="flex flex-wrap items-center gap-3">
               <Button asChild>
-                <Link to="/login">Ir para login</Link>
+                <Link to="/login">{session ? "Conta" : "Ir para login"}</Link>
               </Button>
+
+              {!isLoading && session && profile?.role === "owner" ? (
+                <Button asChild variant="secondary">
+                  <Link to="/owner">Dashboard do Dono</Link>
+                </Button>
+              ) : null}
+
               <Button variant="secondary" asChild>
                 <a href="#mvp">Ver módulos do MVP</a>
               </Button>
@@ -33,7 +43,9 @@ export default function Index() {
           <Card>
             <CardHeader>
               <CardTitle>Próximo passo</CardTitle>
-              <CardDescription>Implementar perfis, entregas, rastreio e visões (cliente/dono/motorista)</CardDescription>
+              <CardDescription>
+                Implementar entregas, rastreio (cliente) e visões (dono/motorista)
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <ul className="list-disc pl-5 text-sm text-muted-foreground">
