@@ -10,11 +10,11 @@ import {
 } from "../../domain/delivery-status.js";
 import { RecalculateRouteEta } from "../../../ai/application/use-cases/recalculate-route-eta.js";
 import { RecordEtaErrorOnDeliveryDelivered } from "../../../ai/application/use-cases/record-eta_error_on_delivery_delivered.js";
+import { EvaluateRouteRisk } from "../../../ai/application/use-cases/evaluate-route-risk.js";
 
 const InputSchema = z.object({
   id: z.string().uuid(),
   status: DeliveryStatusSchema,
-  // opcional: permite disparar ETA com info operacional quando status muda
   distanceRemainingKm: z.number().nonnegative().optional(),
   avgSpeedKmh: z.number().positive().optional(),
 });
@@ -79,8 +79,8 @@ export class UpdateDeliveryStatus {
 
     if (eventError) throw eventError;
 
-    const shouldRecalc = to === "IN_TRANSIT" || to === "STOPPED";
-    if (shouldRecalc && auth.role === "OWNER" && parsed.distanceRemainingKm != null) {
+    const shouldRecalcEta = to === "IN_TRANSIT" || to === "STOPPED";
+    if (shouldRecalcEta && auth.role === "OWNER" && parsed.distanceRemainingKm != null) {
       await new RecalculateRouteEta().execute(
         {
           routeId: updated.route_id as string,
@@ -88,6 +88,15 @@ export class UpdateDeliveryStatus {
           avgSpeedKmh: parsed.avgSpeedKmh,
           reason: "STATUS_CHANGE",
         },
+        auth
+      );
+    }
+
+    // Avalia risco somente em eventos relevantes (status change).
+    // (Para DELIVERED, já fazemos comparação de ETA; risco fica estável).
+    if ((to === "IN_TRANSIT" || to === "STOPPED") && auth.role === "OWNER") {
+      await new EvaluateRouteRisk().execute(
+        { routeId: updated.route_id as string, reason: "STATUS_CHANGE" },
         auth
       );
     }
