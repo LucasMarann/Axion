@@ -25,6 +25,8 @@ const StatusParamsSchema = z.object({
 
 const StatusBodySchema = z.object({
   status: DeliveryStatusSchema,
+  distanceRemainingKm: z.number().nonnegative().optional(),
+  avgSpeedKmh: z.number().positive().optional(),
 });
 
 export class DeliveriesController {
@@ -54,7 +56,10 @@ export class DeliveriesController {
     const auth = (req as any).auth;
 
     const useCase = new UpdateDeliveryStatus();
-    const result = await useCase.execute({ id, status: body.status }, auth);
+    const result = await useCase.execute(
+      { id, status: body.status, distanceRemainingKm: body.distanceRemainingKm, avgSpeedKmh: body.avgSpeedKmh },
+      auth
+    );
 
     res.json(result);
   };

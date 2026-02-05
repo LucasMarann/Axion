@@ -8,10 +8,15 @@ import {
   type DeliveryStatus,
   isFinalStatus,
 } from "../../domain/delivery-status.js";
+import { RecalculateRouteEta } from "../../../ai/application/use-cases/recalculate-route-eta.js";
+import { RecordEtaErrorOnDeliveryDelivered } from "../../../ai/application/use-cases/record-eta_error_on_delivery_delivered.js";
 
 const InputSchema = z.object({
   id: z.string().uuid(),
   status: DeliveryStatusSchema,
+  // opcional: permite disparar ETA com info operacional quando status muda
+  distanceRemainingKm: z.number().nonnegative().optional(),
+  avgSpeedKmh: z.number().positive().optional(),
 });
 
 export type UpdateDeliveryStatusInput = z.infer<typeof InputSchema>;
@@ -20,9 +25,6 @@ export class UpdateDeliveryStatus {
   async execute(input: UpdateDeliveryStatusInput, auth: AuthContext) {
     const parsed = InputSchema.parse(input);
 
-    // MVP: quem pode atualizar status?
-    // - OWNER (sempre)
-    // - DRIVER (apenas se a entrega estiver na rota ativa dele) -> isso depende do schema/policies.
     if (auth.role !== "OWNER" && auth.role !== "DRIVER") {
       throw new HttpError("Forbidden", 403, { code: "FORBIDDEN" });
     }
@@ -59,8 +61,6 @@ export class UpdateDeliveryStatus {
     if (updateError) throw updateError;
 
     if (!updated?.route_id) {
-      // Sem rota não tem como criar route_event (tabela exige route_id NOT NULL).
-      // Mantemos a atualização; o MVP exige evento "toda mudança gera RouteEvent" no contexto de rota.
       return { delivery: updated, routeEventCreated: false };
     }
 
@@ -78,6 +78,30 @@ export class UpdateDeliveryStatus {
     });
 
     if (eventError) throw eventError;
+
+    const shouldRecalc = to === "IN_TRANSIT" || to === "STOPPED";
+    if (shouldRecalc && auth.role === "OWNER" && parsed.distanceRemainingKm != null) {
+      await new RecalculateRouteEta().execute(
+        {
+          routeId: updated.route_id as string,
+          distanceRemainingKm: parsed.distanceRemainingKm,
+          avgSpeedKmh: parsed.avgSpeedKmh,
+          reason: "STATUS_CHANGE",
+        },
+        auth
+      );
+    }
+
+    if (to === "DELIVERED" && auth.role === "OWNER" && updated.delivered_at) {
+      await new RecordEtaErrorOnDeliveryDelivered().execute(
+        {
+          routeId: updated.route_id as string,
+          deliveryId: updated.id as string,
+          deliveredAt: updated.delivered_at as string,
+        },
+        auth
+      );
+    }
 
     return { delivery: updated, routeEventCreated: true };
   }
