@@ -9,6 +9,7 @@ import {
   type AntiSpamLimits,
   type NotificationType,
 } from "../../domain/notification.js";
+import { trackEventAsync } from "../../../metrics/application/track-event.js";
 
 const InputSchema = z.object({
   recipientUserId: z.string().uuid(),
@@ -54,10 +55,8 @@ export class CreateNotification {
     const rateLimitSeconds =
       viewer === "CLIENT" ? limits.rateLimitPerRouteSecondsClient : limits.rateLimitPerRouteSecondsOwner;
 
-    // Força para críticos (ex: DELAYED) — mas ainda grava histórico (apenas não bloqueia)
     const force = parsed.force === true || priority === "CRITICAL";
 
-    // 1) Rate limit por rota (se routeId existir)
     if (!force && parsed.routeId) {
       const cutoff = new Date(Date.now() - rateLimitSeconds * 1000).toISOString();
       const { data: recentByRoute, error } = await supabase
@@ -75,7 +74,6 @@ export class CreateNotification {
       }
     }
 
-    // 2) Dedupe por tipo + rota + entrega em janela
     if (!force) {
       const cutoff = new Date(Date.now() - dedupeWindowSeconds * 1000).toISOString();
 
@@ -122,6 +120,25 @@ export class CreateNotification {
       .single();
 
     if (insertErr) throw insertErr;
+
+    trackEventAsync(
+      {
+        eventName: "NOTIFICATION_SENT",
+        userId: auth.userId,
+        routeId: (created as any)?.route_id ?? parsed.routeId ?? null,
+        deliveryId: (created as any)?.delivery_id ?? parsed.deliveryId ?? null,
+        properties: {
+          notification_id: (created as any)?.id ?? null,
+          recipient_user_id: parsed.recipientUserId,
+          type: parsed.type,
+          priority,
+          viewer,
+        },
+        source: "backend",
+      },
+      auth.accessToken,
+      "create-notification"
+    );
 
     return { created: true as const, notification: created };
   }

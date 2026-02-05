@@ -7,6 +7,7 @@ import { GetRouteAvgSpeed } from "./get-route-avg-speed.js";
 import { GetRouteHistoricalSpeedFactor } from "./get-route-historical-speed-factor.js";
 import { GenerateRouteInsight } from "./generate-route-insight.js";
 import { CreateNotification } from "../../../notifications/application/use-cases/create-notification.js";
+import { trackEventAsync } from "../../../metrics/application/track-event.js";
 
 const InputSchema = z.object({
   routeId: z.string().uuid(),
@@ -229,7 +230,6 @@ export class EvaluateRouteRisk {
 
       if (evErr) throw evErr;
 
-      // Notificações padronizadas (Owner): críticas
       if (nextRisk === "AT_RISK") {
         await new CreateNotification().execute(
           {
@@ -260,6 +260,21 @@ export class EvaluateRouteRisk {
           },
           auth,
           { viewer: "OWNER" }
+        );
+      }
+
+      // Métrica assíncrona: rota marcada como risco (AT_RISK / DELAYED)
+      if (nextRisk === "AT_RISK" || nextRisk === "DELAYED") {
+        trackEventAsync(
+          {
+            eventName: "ROUTE_MARKED_AS_RISK",
+            userId: auth.userId,
+            routeId: parsed.routeId,
+            properties: { level: nextRisk, previous: prevRisk, reason: parsed.reason ?? "PERIODIC" },
+            source: "backend",
+          },
+          auth.accessToken,
+          "evaluate-route-risk"
         );
       }
 

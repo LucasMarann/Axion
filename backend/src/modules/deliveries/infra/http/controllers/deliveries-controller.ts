@@ -4,6 +4,7 @@ import { GetDeliveryByTracking } from "../../../application/use-cases/get-delive
 import { CreateDelivery } from "../../../application/use-cases/create-delivery.js";
 import { UpdateDeliveryStatus } from "../../../application/use-cases/update-delivery-status.js";
 import { DeliveryStatusSchema } from "../../../domain/delivery-status.js";
+import { trackEventAsync } from "../../../../metrics/application/track-event.js";
 
 const TrackingParamsSchema = z.object({
   trackingCode: z.string().min(3),
@@ -46,6 +47,19 @@ export class DeliveriesController {
 
     const useCase = new GetDeliveryByTracking();
     const result = await useCase.execute({ trackingCode }, auth);
+
+    trackEventAsync(
+      {
+        eventName: "TRACKING_ACCESSED",
+        userId: auth?.userId ?? null,
+        routeId: (result as any)?.delivery?.route_id ?? null,
+        deliveryId: (result as any)?.delivery?.id ?? null,
+        properties: { tracking_code: trackingCode, role: auth?.role ?? null },
+        source: "backend",
+      },
+      auth.accessToken,
+      "deliveries-controller"
+    );
 
     res.json(result);
   };
