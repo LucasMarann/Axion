@@ -5,6 +5,7 @@ import { HttpError } from "../../../infra/http/errors/http-error.js";
 import { computeEtaSeconds, toEtaAtFromNow } from "../../domain/eta.js";
 import { GetRouteAvgSpeed } from "./get-route-avg-speed.js";
 import { GetRouteHistoricalSpeedFactor } from "./get-route-historical-speed-factor.js";
+import { GenerateRouteInsight } from "./generate-route-insight.js";
 
 const InputSchema = z.object({
   routeId: z.string().uuid(),
@@ -26,7 +27,6 @@ export class RecalculateRouteEta {
     const parsed = InputSchema.parse(input);
     const supabase = createSupabaseUserClient(auth.accessToken);
 
-    // Evita recalcular demais: checa último insight da rota
     const { data: lastInsight, error: lastError } = await supabase
       .from("ai_insights")
       .select("id, generated_at, eta_at, risk_level, summary")
@@ -50,7 +50,6 @@ export class RecalculateRouteEta {
       }
     }
 
-    // Velocidade média: input > snapshots > fallback
     let avgSpeedKmh = parsed.avgSpeedKmh ?? null;
     let avgSpeedSampleSize = 0;
 
@@ -61,7 +60,6 @@ export class RecalculateRouteEta {
     }
 
     if (avgSpeedKmh == null) {
-      // Sem velocidade, assume um mínimo seguro (computeEtaSeconds já clampa)
       avgSpeedKmh = 5;
     }
 
@@ -75,8 +73,6 @@ export class RecalculateRouteEta {
 
     const etaAt = toEtaAtFromNow(etaSeconds);
 
-    // Risco simples (MVP): se velocidade muito baixa ou ETA muito longe, marca "em risco"
-    // (Mantemos o schema risk_level como texto livre, mas seguindo MVP)
     let risk_level: "normal" | "em_risco" | "atrasada" = "normal";
     if (avgSpeedKmh <= 10) risk_level = "em_risco";
     if (etaSeconds > 24 * 3600) risk_level = "em_risco";
@@ -112,7 +108,6 @@ export class RecalculateRouteEta {
 
     if (createError) throw createError;
 
-    // Métrica essencial (MVP): registra que recalculou ETA
     const { error: metricError } = await supabase.from("metric_events").insert({
       event_name: "ETA_RECALCULATED",
       occurred_at: new Date().toISOString(),
@@ -129,6 +124,9 @@ export class RecalculateRouteEta {
 
     if (metricError) throw metricError;
 
-    return { recalculated: true, insight: created };
+    // Insight ativo (1 por rota)
+    const insight = await new GenerateRouteInsight().execute({ routeId: parsed.routeId, reason: "ETA_RECALC" }, auth);
+
+    return { recalculated: true, insight: created, activeInsight: insight.activeInsight };
   }
 }

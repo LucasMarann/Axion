@@ -5,6 +5,7 @@ import { HttpError } from "../../../infra/http/errors/http-error.js";
 import { DEFAULT_LIMITS, assertValidLimits, proposeRiskLevel, type RiskLevel, type RiskLimits } from "../../domain/risk.js";
 import { GetRouteAvgSpeed } from "./get-route-avg-speed.js";
 import { GetRouteHistoricalSpeedFactor } from "./get-route-historical-speed-factor.js";
+import { GenerateRouteInsight } from "./generate-route-insight.js";
 
 const InputSchema = z.object({
   routeId: z.string().uuid(),
@@ -37,7 +38,6 @@ function mergeLimits(partial?: EvaluateRouteRiskInput["limits"]): RiskLimits {
 
 function normalizeAiRiskLevel(v: any): RiskLevel {
   if (v === "NORMAL" || v === "AT_RISK" || v === "DELAYED") return v;
-  // compat: versões antigas que gravaram "normal/em_risco/atrasada"
   if (v === "normal") return "NORMAL";
   if (v === "em_risco") return "AT_RISK";
   if (v === "atrasada") return "DELAYED";
@@ -55,10 +55,6 @@ export class EvaluateRouteRisk {
 
     const supabase = createSupabaseUserClient(auth.accessToken);
 
-    // 1) Busca último insight (se existir) para:
-    // - eta_at (gatilho ETA estourado)
-    // - risk atual
-    // - counters anti-falso-positivo
     const { data: lastInsight, error: lastErr } = await supabase
       .from("ai_insights")
       .select("id, generated_at, eta_at, risk_level, summary, features, model_version")
@@ -72,15 +68,12 @@ export class EvaluateRouteRisk {
     const prevRisk: RiskLevel = normalizeAiRiskLevel(lastInsight?.risk_level);
     const prevFeatures = (lastInsight?.features ?? {}) as any;
 
-    // 2) Sinal: ETA estourado
     let etaOverdue = false;
     if (lastInsight?.eta_at) {
       const etaAt = new Date(lastInsight.eta_at as string);
       etaOverdue = Date.now() > etaAt.getTime() + limits.etaOverdueGraceSeconds * 1000;
     }
 
-    // 3) Sinal: parada prolongada (pela rota: snapshots recentes com speed baixa)
-    // Estratégia simples: pega snapshots das últimas 2h e procura um bloco final contínuo parado.
     const since = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
     const { data: snaps, error: snapsErr } = await supabase
       .from("location_snapshots")
@@ -97,7 +90,6 @@ export class EvaluateRouteRisk {
 
     const rows = (snaps ?? []) as any[];
     if (rows.length >= 2) {
-      // percorre de trás pra frente pegando o bloco final "parado"
       let endIdx = rows.length - 1;
       let i = endIdx;
 
@@ -119,22 +111,17 @@ export class EvaluateRouteRisk {
       }
     }
 
-    // 4) Sinal: velocidade fora do padrão (média recente muito abaixo do histórico)
     const avg = await new GetRouteAvgSpeed().execute({ routeId: parsed.routeId }, auth);
     const historical = await new GetRouteHistoricalSpeedFactor().execute({ routeId: parsed.routeId }, auth);
 
     let speedOutOfPattern = false;
     if (avg.avgSpeedKmh != null && (avg.sampleSize ?? 0) >= limits.minSpeedSampleSize) {
-      const expected = 60 * (historical.factor ?? 1); // baseline * fator
+      const expected = 60 * (historical.factor ?? 1);
       speedOutOfPattern = avg.avgSpeedKmh < expected * limits.speedBelowHistoricalFactor;
     }
 
-    // 5) Decide risco "proposto" pelo momento
     const proposed = proposeRiskLevel({ stopProlonged, speedOutOfPattern, etaOverdue });
 
-    // 6) Anti-falso-positivo (histerese):
-    // - AT_RISK: precisa bater N vezes seguidas antes de mudar de NORMAL
-    // - DELAYED: precisa bater M vezes seguidas antes de mudar de AT_RISK
     const prevHits = {
       atRiskHits: Number(prevFeatures?.risk_hits?.atRiskHits ?? 0),
       delayedHits: Number(prevFeatures?.risk_hits?.delayedHits ?? 0),
@@ -148,7 +135,7 @@ export class EvaluateRouteRisk {
       delayedHits = 0;
     } else if (proposed === "DELAYED") {
       delayedHits += 1;
-      atRiskHits = Math.max(atRiskHits, limits.atRiskMinConsecutiveHits); // garante antecedência
+      atRiskHits = Math.max(atRiskHits, limits.atRiskMinConsecutiveHits);
     } else {
       atRiskHits = 0;
       delayedHits = 0;
@@ -156,39 +143,30 @@ export class EvaluateRouteRisk {
 
     let nextRisk: RiskLevel = prevRisk;
 
-    // Regras de transição:
-    // NORMAL -> AT_RISK somente após hits suficientes
     if (prevRisk === "NORMAL" && proposed === "AT_RISK" && atRiskHits >= limits.atRiskMinConsecutiveHits) {
       nextRisk = "AT_RISK";
     }
 
-    // NORMAL -> DELAYED: proibido (AT_RISK deve anteceder)
     if (prevRisk === "NORMAL" && proposed === "DELAYED") {
-      // força o primeiro degrau
       if (atRiskHits >= limits.atRiskMinConsecutiveHits) nextRisk = "AT_RISK";
     }
 
-    // AT_RISK -> DELAYED somente após hits suficientes
     if (prevRisk === "AT_RISK" && proposed === "DELAYED" && delayedHits >= limits.delayedMinConsecutiveHits) {
       nextRisk = "DELAYED";
     }
 
-    // AT_RISK -> NORMAL: só se não há sinais (reseta)
     if (prevRisk === "AT_RISK" && proposed === "NORMAL") {
       nextRisk = "NORMAL";
     }
 
-    // DELAYED -> AT_RISK/NORMAL: MVP: mantém DELAYED até resolver manualmente (ou até nova regra).
-    // Para não “oscilar”, não vamos rebaixar automaticamente aqui.
     if (prevRisk === "DELAYED") {
       nextRisk = "DELAYED";
     }
 
     const riskChanged = nextRisk !== prevRisk;
 
-    // 7) Persistir mudança: grava ai_insights novo apenas quando há mudança de risco
-    // (mantém histórico de decisões)
     let createdInsight: any = null;
+    let activeInsight: any = null;
 
     if (riskChanged) {
       const summary =
@@ -234,7 +212,6 @@ export class EvaluateRouteRisk {
       if (insErr) throw insErr;
       createdInsight = inserted;
 
-      // route_event
       const { error: evErr } = await supabase.from("route_events").insert({
         route_id: parsed.routeId,
         event_type: "RISK_LEVEL_CHANGED",
@@ -251,8 +228,6 @@ export class EvaluateRouteRisk {
 
       if (evErr) throw evErr;
 
-      // notificação (MVP): para o dono (recipient_user_id = auth.userId)
-      // Se você tiver um “owner” diferente do usuário que executa, depois ajustamos para lookup do owner.
       const { error: notifErr } = await supabase.from("notifications").insert({
         recipient_user_id: auth.userId,
         delivery_id: null,
@@ -275,7 +250,6 @@ export class EvaluateRouteRisk {
 
       if (notifErr) throw notifErr;
 
-      // métrica
       const { error: metricErr } = await supabase.from("metric_events").insert({
         event_name: "RISK_LEVEL_CHANGED",
         occurred_at: new Date().toISOString(),
@@ -287,6 +261,10 @@ export class EvaluateRouteRisk {
       });
 
       if (metricErr) throw metricErr;
+
+      // Insight ativo (1 por rota)
+      const generated = await new GenerateRouteInsight().execute({ routeId: parsed.routeId, reason: "RISK_CHANGE" }, auth);
+      activeInsight = generated.activeInsight;
     }
 
     return {
@@ -298,6 +276,7 @@ export class EvaluateRouteRisk {
       counters: { atRiskHits, delayedHits },
       limits,
       insight: createdInsight,
+      activeInsight,
     };
   }
 }

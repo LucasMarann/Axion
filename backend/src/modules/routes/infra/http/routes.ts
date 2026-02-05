@@ -7,8 +7,10 @@ export function routesRoutes() {
   const router = Router();
   const controller = new RoutesController();
 
-  // Visualização de rotas (mínimo: CLIENT e OWNER)
   router.get("/:routeId/view", requireAuth(), requireRole(["OWNER", "CLIENT"]), controller.view);
+
+  // Insight ativo (CLIENT/OWNER) – o RLS deve controlar acesso por rota
+  router.get("/:routeId/insight", requireAuth(), requireRole(["OWNER", "CLIENT"]), controller.activeInsight);
 
   return router;
 }
