@@ -6,6 +6,7 @@ import { DEFAULT_LIMITS, assertValidLimits, proposeRiskLevel, type RiskLevel, ty
 import { GetRouteAvgSpeed } from "./get-route-avg-speed.js";
 import { GetRouteHistoricalSpeedFactor } from "./get-route-historical-speed-factor.js";
 import { GenerateRouteInsight } from "./generate-route-insight.js";
+import { CreateNotification } from "../../../notifications/application/use-cases/create-notification.js";
 
 const InputSchema = z.object({
   routeId: z.string().uuid(),
@@ -228,27 +229,39 @@ export class EvaluateRouteRisk {
 
       if (evErr) throw evErr;
 
-      const { error: notifErr } = await supabase.from("notifications").insert({
-        recipient_user_id: auth.userId,
-        delivery_id: null,
-        route_id: parsed.routeId,
-        type: "RISK_LEVEL_CHANGED",
-        title: nextRisk === "AT_RISK" ? "Rota em risco" : nextRisk === "DELAYED" ? "Rota atrasada" : "Rota normalizada",
-        message:
-          nextRisk === "AT_RISK"
-            ? "Detectamos sinais de risco de atraso (parada/velocidade/ETA)."
-            : nextRisk === "DELAYED"
-              ? "ETA estourado ou sinais persistentes: rota marcada como atrasada."
-              : "Sinais de risco não persistiram; rota voltou ao normal.",
-        status: "created",
-        meta: {
-          from: prevRisk,
-          to: nextRisk,
-          reason: parsed.reason ?? "PERIODIC",
-        },
-      });
+      // Notificações padronizadas (Owner): críticas
+      if (nextRisk === "AT_RISK") {
+        await new CreateNotification().execute(
+          {
+            recipientUserId: auth.userId,
+            type: "RISK_AT_RISK",
+            title: "Rota em risco",
+            message: "Sinais de risco de atraso detectados; acompanhe a operação.",
+            routeId: parsed.routeId,
+            deliveryId: null,
+            meta: { from: prevRisk, to: nextRisk, signals: features.risk_signals, reason: parsed.reason ?? "PERIODIC" },
+          },
+          auth,
+          { viewer: "OWNER" }
+        );
+      }
 
-      if (notifErr) throw notifErr;
+      if (nextRisk === "DELAYED") {
+        await new CreateNotification().execute(
+          {
+            recipientUserId: auth.userId,
+            type: "RISK_DELAYED",
+            title: "Atraso confirmado",
+            message: "ETA estourado ou sinais persistentes: rota marcada como atrasada.",
+            routeId: parsed.routeId,
+            deliveryId: null,
+            meta: { from: prevRisk, to: nextRisk, signals: features.risk_signals, reason: parsed.reason ?? "PERIODIC" },
+            force: true,
+          },
+          auth,
+          { viewer: "OWNER" }
+        );
+      }
 
       const { error: metricErr } = await supabase.from("metric_events").insert({
         event_name: "RISK_LEVEL_CHANGED",
@@ -262,7 +275,6 @@ export class EvaluateRouteRisk {
 
       if (metricErr) throw metricErr;
 
-      // Insight ativo (1 por rota)
       const generated = await new GenerateRouteInsight().execute({ routeId: parsed.routeId, reason: "RISK_CHANGE" }, auth);
       activeInsight = generated.activeInsight;
     }

@@ -11,6 +11,7 @@ import {
 import { RecalculateRouteEta } from "../../../ai/application/use-cases/recalculate-route-eta.js";
 import { RecordEtaErrorOnDeliveryDelivered } from "../../../ai/application/use-cases/record-eta_error_on_delivery_delivered.js";
 import { EvaluateRouteRisk } from "../../../ai/application/use-cases/evaluate-route-risk.js";
+import { CreateNotification } from "../../../notifications/application/use-cases/create-notification.js";
 
 const InputSchema = z.object({
   id: z.string().uuid(),
@@ -20,6 +21,14 @@ const InputSchema = z.object({
 });
 
 export type UpdateDeliveryStatusInput = z.infer<typeof InputSchema>;
+
+function statusLabel(s: string) {
+  if (s === "COLLECTED") return "Coletado";
+  if (s === "IN_TRANSIT") return "Em trânsito";
+  if (s === "STOPPED") return "Parada";
+  if (s === "DELIVERED") return "Entregue";
+  return s;
+}
 
 export class UpdateDeliveryStatus {
   async execute(input: UpdateDeliveryStatusInput, auth: AuthContext) {
@@ -33,7 +42,7 @@ export class UpdateDeliveryStatus {
 
     const { data: current, error: currentError } = await supabase
       .from("deliveries")
-      .select("id, status, route_id, delivered_at")
+      .select("id, status, route_id, delivered_at, tracking_code")
       .eq("id", parsed.id)
       .maybeSingle();
 
@@ -55,7 +64,7 @@ export class UpdateDeliveryStatus {
         updated_at: new Date().toISOString(),
       })
       .eq("id", parsed.id)
-      .select("id, status, route_id, delivered_at, updated_at")
+      .select("id, status, route_id, delivered_at, updated_at, tracking_code")
       .single();
 
     if (updateError) throw updateError;
@@ -79,6 +88,23 @@ export class UpdateDeliveryStatus {
 
     if (eventError) throw eventError;
 
+    // Notificação (Owner): mudança de status (histórico obrigatório + anti-spam)
+    if (auth.role === "OWNER") {
+      await new CreateNotification().execute(
+        {
+          recipientUserId: auth.userId,
+          type: "DELIVERY_STATUS_CHANGED",
+          title: "Mudança de status",
+          message: `Entrega ${updated.tracking_code}: ${statusLabel(from)} → ${statusLabel(to)}.`,
+          routeId: updated.route_id as string,
+          deliveryId: updated.id as string,
+          meta: { from, to, tracking_code: updated.tracking_code },
+        },
+        auth,
+        { viewer: "OWNER" }
+      );
+    }
+
     const shouldRecalcEta = to === "IN_TRANSIT" || to === "STOPPED";
     if (shouldRecalcEta && auth.role === "OWNER" && parsed.distanceRemainingKm != null) {
       await new RecalculateRouteEta().execute(
@@ -92,13 +118,8 @@ export class UpdateDeliveryStatus {
       );
     }
 
-    // Avalia risco somente em eventos relevantes (status change).
-    // (Para DELIVERED, já fazemos comparação de ETA; risco fica estável).
     if ((to === "IN_TRANSIT" || to === "STOPPED") && auth.role === "OWNER") {
-      await new EvaluateRouteRisk().execute(
-        { routeId: updated.route_id as string, reason: "STATUS_CHANGE" },
-        auth
-      );
+      await new EvaluateRouteRisk().execute({ routeId: updated.route_id as string, reason: "STATUS_CHANGE" }, auth);
     }
 
     if (to === "DELIVERED" && auth.role === "OWNER" && updated.delivered_at) {

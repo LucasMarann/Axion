@@ -6,6 +6,9 @@ import { computeEtaSeconds, toEtaAtFromNow } from "../../domain/eta.js";
 import { GetRouteAvgSpeed } from "./get-route-avg-speed.js";
 import { GetRouteHistoricalSpeedFactor } from "./get-route-historical-speed-factor.js";
 import { GenerateRouteInsight } from "./generate-route-insight.js";
+import { CreateNotification } from "../../../notifications/application/use-cases/create-notification.js";
+import { shouldNotifyEta } from "../../../notifications/application/use-cases/should-notify-eta.js";
+import { DEFAULT_LIMITS } from "../../../notifications/domain/notification.js";
 
 const InputSchema = z.object({
   routeId: z.string().uuid(),
@@ -16,7 +19,7 @@ const InputSchema = z.object({
 
 export type RecalculateRouteEtaInput = z.infer<typeof InputSchema>;
 
-const MIN_RECALC_INTERVAL_SECONDS = 10 * 60; // 10 min (evita processamento excessivo)
+const MIN_RECALC_INTERVAL_SECONDS = 10 * 60;
 
 export class RecalculateRouteEta {
   async execute(input: RecalculateRouteEtaInput, auth: AuthContext) {
@@ -124,7 +127,29 @@ export class RecalculateRouteEta {
 
     if (metricError) throw metricError;
 
-    // Insight ativo (1 por rota)
+    // Notificação de ETA (Owner): só se mudança relevante
+    const isRelevantForOwner = shouldNotifyEta({
+      previousEtaAt: (lastInsight?.eta_at as string | null) ?? null,
+      nextEtaAt: etaAt,
+      thresholdMinutes: DEFAULT_LIMITS.etaDeltaMinutesThresholdOwner,
+    });
+
+    if (isRelevantForOwner && auth.role === "OWNER") {
+      await new CreateNotification().execute(
+        {
+          recipientUserId: auth.userId,
+          type: "ETA_UPDATED",
+          title: "ETA atualizado",
+          message: `Nova previsão: ${new Date(etaAt).toLocaleString("pt-BR")}.`,
+          routeId: parsed.routeId,
+          deliveryId: null,
+          meta: { eta_at: etaAt, previous_eta_at: (lastInsight?.eta_at as string | null) ?? null, reason: parsed.reason ?? "PERIODIC" },
+        },
+        auth,
+        { viewer: "OWNER" }
+      );
+    }
+
     const insight = await new GenerateRouteInsight().execute({ routeId: parsed.routeId, reason: "ETA_RECALC" }, auth);
 
     return { recalculated: true, insight: created, activeInsight: insight.activeInsight };
